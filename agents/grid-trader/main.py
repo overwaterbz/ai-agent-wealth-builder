@@ -64,6 +64,12 @@ RSI_OVERSOLD        = 35      # Only SHORT when RSI > 35 (not oversold)
 # Trailing stop ratchet: trail SL at (price - TRAIL_DISTANCE * entry_price) for longs
 TRAIL_DISTANCE_PCT  = 0.006   # 0.6% trailing distance (tighter than initial SL to lock profits)
 
+# Anti-churn: minimum cooldown (seconds) after closing a position before re-entering
+ENTRY_COOLDOWN_SEC  = int(os.getenv("SNIPER_ENTRY_COOLDOWN_SEC", "3600"))  # 60 min default
+
+# Minimum EMA spread to enter (avoids choppy crossover zones)
+MIN_EMA_SPREAD      = float(os.getenv("SNIPER_MIN_EMA_SPREAD", "0.001"))  # 0.10%
+
 # HL API endpoint
 HL_INFO_URL         = "https://api.hyperliquid.xyz/info"
 
@@ -268,12 +274,14 @@ def _get_signal(candles):
     LONG:  EMA5 > EMA20 (uptrend) AND current price <= EMA5 (pullback dip) AND RSI < 65
     SHORT: EMA5 < EMA20 (downtrend) AND current price >= EMA5 (bounce) AND RSI > 35
     """
-    if len(candles) < EMA_LONG + 1:
+    if len(candles) < EMA_LONG + 2:
         logger.warning(f"Insufficient candles ({len(candles)}) for EMA-{EMA_LONG}")
         return "FLAT", 0.0, 0.0
 
-    closes = [c["c"] for c in candles]
-    current_price = closes[-1]
+    # Use only COMPLETED candles for EMA/RSI (drop in-progress candle to avoid flicker)
+    completed = candles[:-1]
+    closes = [c["c"] for c in completed]
+    current_price = candles[-1]["c"]  # Live price for entry trigger
 
     ema_short = _compute_ema(closes, EMA_SHORT)
     ema_long = _compute_ema(closes, EMA_LONG)
@@ -290,9 +298,9 @@ def _get_signal(candles):
         f"price={current_price:.2f} spread={(ema_short-ema_long)/ema_long*100:.3f}% {rsi_str}"
     )
 
-    # Require meaningful EMA separation (0.02% minimum) to avoid chop
+    # Require meaningful EMA separation to avoid chop
     ema_spread = abs(ema_short - ema_long) / ema_long
-    if ema_spread < 0.0002:
+    if ema_spread < MIN_EMA_SPREAD:
         return "FLAT", ema_short, ema_long
 
     if ema_short > ema_long and current_price <= ema_short:
@@ -339,6 +347,7 @@ class SniperState:
         self.tp_oid = ""             # Order ID for take-profit limit
         self.sl_oid = ""             # Order ID for exchange-side stop-loss limit
         self.trailing_active = False # True once SL moved to breakeven
+        self.last_close_time = ""   # ISO timestamp of last position close (cooldown)
         # Cumulative stats
         self.total_pnl = 0.0
         self.total_trades = 0
@@ -360,6 +369,7 @@ class SniperState:
                 "tp_oid": self.tp_oid,
                 "sl_oid": self.sl_oid,
                 "trailing_active": self.trailing_active,
+                "last_close_time": self.last_close_time,
                 "total_pnl": self.total_pnl,
                 "total_trades": self.total_trades,
                 "wins": self.wins,
@@ -387,6 +397,7 @@ class SniperState:
                 self.tp_oid = data.get("tp_oid", "")
                 self.sl_oid = data.get("sl_oid", "")
                 self.trailing_active = data.get("trailing_active", False)
+                self.last_close_time = data.get("last_close_time", "")
                 self.total_pnl = data.get("total_pnl", 0.0)
                 self.total_trades = data.get("total_trades", 0)
                 self.wins = data.get("wins", 0)
@@ -414,6 +425,7 @@ class SniperState:
         self.tp_oid = ""
         self.sl_oid = ""
         self.trailing_active = False
+        self.last_close_time = datetime.now(timezone.utc).isoformat()
         self.save()
 
     @property
@@ -1003,6 +1015,18 @@ def _run_coin_cycle(info, exchange, address, coin, state):
         logger.info(f"[{coin}] Outside peak hours ({PEAK_HOUR_START}-{PEAK_HOUR_END} UTC, now={hour}h) — idle")
         return
 
+    # Check cooldown after last position close
+    if state.last_close_time:
+        try:
+            last_close_dt = datetime.fromisoformat(state.last_close_time)
+            elapsed = (datetime.now(timezone.utc) - last_close_dt).total_seconds()
+            if elapsed < ENTRY_COOLDOWN_SEC:
+                remaining = int(ENTRY_COOLDOWN_SEC - elapsed)
+                logger.info(f"[{coin}] Cooldown active — {remaining}s remaining (last close: {state.last_close_time})")
+                return
+        except Exception:
+            pass
+
     # Fetch candles and compute signal
     candles = _fetch_candles(coin)
     if not candles:
@@ -1150,7 +1174,9 @@ def main():
         f"risk={RISK_FRACTION*100:.0f}% SL={SL_PCT*100:.1f}% TP_ratio={TP_RATIO:.1f}:1 "
         f"peak={PEAK_HOUR_START}-{PEAK_HOUR_END}UTC EMA={EMA_SHORT}/{EMA_LONG} "
         f"RSI={RSI_PERIOD}({RSI_OVERSOLD}/{RSI_OVERBOUGHT}) ATR_SL={USE_ATR_SL} "
-        f"trailing=ratchet@{TRAIL_DISTANCE_PCT*100:.1f}% exchange_SL=on dry_run={IS_DRY_RUN}"
+        f"trailing=ratchet@{TRAIL_DISTANCE_PCT*100:.1f}% exchange_SL=on "
+        f"cooldown={ENTRY_COOLDOWN_SEC}s min_spread={MIN_EMA_SPREAD*100:.2f}% "
+        f"completed_candles=True dry_run={IS_DRY_RUN}"
     )
 
     # Cancel any stale orders left from previous runs
