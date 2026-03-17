@@ -148,7 +148,9 @@ def _get_account_state(info, address):
         account_value = float(ms.get("accountValue", "0"))
         total_margin = float(ms.get("totalMarginUsed", "0"))
         # Unified account: spot USDC is also available as perps margin
-        if account_value == 0:
+        # In unified/EVM mode, marginSummary.accountValue can be near-zero
+        # even when real equity sits on the spot side
+        if account_value < 1.0:
             try:
                 spot = info.spot_user_state(address)
                 for b in spot.get("balances", []):
