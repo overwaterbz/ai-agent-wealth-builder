@@ -821,9 +821,9 @@ services:
       <<: *agent-env
       DRY_RUN: "false"  # Live — Hyperliquid multi-coin sniper
       AGENT_ID: grid-trader
-      SNIPER_COINS: ${SNIPER_COINS:-BTC,ETH}
+      SNIPER_COINS: ${SNIPER_COINS:-BTC}
       SNIPER_LEVERAGE: ${SNIPER_LEVERAGE:-20}
-      SNIPER_RISK_FRACTION: ${SNIPER_RISK_FRACTION:-0.12}
+      SNIPER_RISK_FRACTION: ${SNIPER_RISK_FRACTION:-0.25}
       SNIPER_SL_PCT: ${SNIPER_SL_PCT:-0.008}
       SNIPER_TP_RATIO: ${SNIPER_TP_RATIO:-2.5}
       SNIPER_MAX_HOLD_HOURS: ${SNIPER_MAX_HOLD_HOURS:-4}
